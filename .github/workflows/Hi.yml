@@ -1,0 +1,127 @@
+name: Windows Desktop - Manual Download
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Validate required secrets
+        shell: pwsh
+        env:
+          TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTH_KEY)) {
+            throw "Tambahkan TAILSCALE_AUTH_KEY pada repository Actions secrets."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD) -or $env:RDP_PASSWORD.Length -lt 14) {
+            throw "Tambahkan RDP_PASSWORD dengan minimal 14 karakter pada repository Actions secrets."
+          }
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: Optimize Windows for Gaming
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          # Prefer the High Performance power plan.
+          powercfg /setactive SCHEME_MIN
+
+          # Prioritize foreground application scheduling.
+          $priorityPath = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
+          Set-ItemProperty `
+            -Path $priorityPath `
+            -Name Win32PrioritySeparation `
+            -Type DWord `
+            -Value 38
+
+          # Disable Game DVR background recording.
+          $gameConfig = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR"
+          New-Item -Path $gameConfig -Force | Out-Null
+          Set-ItemProperty `
+            -Path $gameConfig `
+            -Name AppCaptureEnabled `
+            -Type DWord `
+            -Value 0
+
+          # Disable capture-related background features.
+          $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"
+          New-Item -Path $policyPath -Force | Out-Null
+          Set-ItemProperty `
+            -Path $policyPath `
+            -Name AllowGameDVR `
+            -Type DWord `
+            -Value 0
+
+          # Enable Windows Game Mode.
+          $gameMode = "HKCU:\Software\Microsoft\GameBar"
+          New-Item -Path $gameMode -Force | Out-Null
+          Set-ItemProperty `
+            -Path $gameMode `
+            -Name AutoGameModeEnabled `
+            -Type DWord `
+            -Value 1
+
+          Set-ItemProperty `
+            -Path $gameMode `
+            -Name AllowAutoGameMode `
+            -Type DWord `
+            -Value 1
+
+          Write-Host "Gaming optimizations applied."
+
+      - name: Configure authenticated Remote Desktop
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $user = Get-LocalUser -Name "FNaFPlayer" -ErrorAction SilentlyContinue
+          if ($user) {
+            Set-LocalUser -Name "FNaFPlayer" -Password $securePassword
+          } else {
+            New-LocalUser -Name "FNaFPlayer" -Password $securePassword -AccountNeverExpires | Out-Null
+          }
+          
+          # Bagian Perbaikan: Memasukkan FNaFPlayer ke grup Remote Desktop & Administrators
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "FNaFPlayer" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "FNaFPlayer" -ErrorAction SilentlyContinue
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 2
+
+          Get-NetFirewallRule -DisplayName "Tailscale-only RDP" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          New-NetFirewallRule -DisplayName "Tailscale-only RDP" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress "100.64.0.0/10" -Profile Any | Out-Null
+          Set-Service -Name TermService -StartupType Manual
+          Start-Service -Name TermService
+          Write-Host "RDP configured with NLA enabled; inbound rule is limited to Tailscale address space."
+
+      - name: Show connection details and keep session alive
+        shell: pwsh
+        run: |
+          $tsIP = (tailscale ip -4 | Select-Object -First 1).Trim()
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+            throw "Tailscale tidak memberikan IPv4 untuk runner."
+          }
+          Write-Host "Tailscale IPv4: $tsIP"
+          Write-Host "Windows App PC Name: $tsIP"
+          Write-Host "Windows username: FNaFPlayer"
+          Write-Host "Password: use the value stored in the RDP_PASSWORD repository secret."
+          Write-Host "This temporary runner will end when the job reaches its time limit or is cancelled."
+          while ($true) {
+            Start-Sleep -Seconds 240
+            Write-Host "Runner active at $(Get-Date -Format o)"
+  
+          }
